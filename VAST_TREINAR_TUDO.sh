@@ -24,6 +24,9 @@ BASE_PYTHON=""
 RAM_MOUNT=""
 WORK_DIR=""
 INPUT_ZIP=""
+SESSION_READY=0
+PRESERVE_ON_EXIT=0
+INTERRUPTED=0
 
 fail() { printf '\nERRO: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n==> %s\n' "$*"; }
@@ -40,7 +43,23 @@ cleanup() {
     RAM_MOUNT=""
   fi
 }
-trap cleanup EXIT INT TERM
+
+on_exit() {
+  if (( PRESERVE_ON_EXIT )); then
+    note "Dados temporarios preservados em $WORK_DIR"
+    return
+  fi
+  cleanup
+}
+
+on_interrupt() {
+  INTERRUPTED=1
+  printf '\n\n==> Interrupcao recebida. O treino foi parado; os dados temporarios permanecem na RAM para o menu.\n'
+}
+
+trap on_exit EXIT
+trap on_interrupt INT
+trap cleanup TERM
 
 need_command() { command -v "$1" >/dev/null 2>&1 || fail "Comando ausente: $1"; }
 
@@ -255,6 +274,9 @@ train_model() {
   export WANDB_DISABLED=true WANDB_MODE=disabled DO_NOT_TRACK=1 TRANSFORMERS_VERBOSITY=error TOKENIZERS_PARALLELISM=false PYTHONUTF8=1
   unset HF_TOKEN HUGGING_FACE_HUB_TOKEN WANDB_API_KEY
 
+  # Um novo inicio pelo menu comeca sem checkpoints parciais, mas preserva o dataset na RAM.
+  rm -rf -- "$WORK_DIR/adapter"
+
   note "Treinando $MODEL_NAME com $gpu_count GPU(s), batch $batch_size por GPU e acumulacao $accumulation"
   # Usa o Python do venv em todos os ranks; o torchrun da imagem base pode nao
   # enxergar os pacotes instalados em $VENV_DIR.
@@ -281,9 +303,8 @@ encrypt_result() {
   printf '\nConcluido. A instancia reteve apenas o arquivo final criptografado: %s\n' "$result"
 }
 
-main() {
-  [[ "${BASH_VERSINFO[0]}" -ge 4 ]] || fail 'Use Bash 4 ou superior.'
-  note "Iniciando $SCRIPT_NAME"
+prepare_session() {
+  (( SESSION_READY == 0 )) || return 0
   install_system_packages
   select_base_python
   need_command nvidia-smi
@@ -296,8 +317,62 @@ main() {
   install_python_environment
   download_and_extract
   prepare_dataset
-  train_model
-  encrypt_result
+  SESSION_READY=1
+}
+
+show_menu() {
+  printf '\n========== Lage Persona ==========\n'
+  printf '1) Preparar e iniciar/reiniciar o treino\n'
+  printf '2) Apagar conversas, dataset, cache e adaptador temporario\n'
+  printf '3) Apagar tambem os LoRAs finais criptografados\n'
+  printf '4) Sair preservando os dados temporarios atuais na RAM\n'
+}
+
+delete_results() {
+  if [[ -d "$RESULTS_DIR" ]]; then
+    find "$RESULTS_DIR" -maxdepth 1 -type f -name 'lage-lora-*.7z' -delete
+  fi
+}
+
+main() {
+  [[ "${BASH_VERSINFO[0]}" -ge 4 ]] || fail 'Use Bash 4 ou superior.'
+  note "Iniciando $SCRIPT_NAME"
+  while true; do
+    show_menu
+    read -r -p 'Escolha [1-4]: ' choice
+    case "$choice" in
+      1)
+        prepare_session
+        INTERRUPTED=0
+        if train_model; then
+          encrypt_result
+          SESSION_READY=0
+          return 0
+        fi
+        if (( INTERRUPTED )); then
+          note 'Treino interrompido. O dataset foi preservado; escolha 1 para reiniciar ou 2/3 para apagar.'
+        else
+          note 'O treino falhou. Os dados temporarios foram preservados para diagnostico ou nova tentativa.'
+        fi
+        ;;
+      2)
+        cleanup
+        SESSION_READY=0
+        note 'Dados temporarios removidos. Ambiente Python e modelo base em cache foram mantidos.'
+        ;;
+      3)
+        cleanup
+        delete_results
+        SESSION_READY=0
+        note 'Dados temporarios e LoRAs finais criptografados foram removidos. Ambiente Python e modelo base em cache foram mantidos.'
+        ;;
+      4)
+        PRESERVE_ON_EXIT=1
+        return 0
+        ;;
+      *) note 'Escolha invalida.' ;;
+    esac
+  done
 }
 
 main "$@"
