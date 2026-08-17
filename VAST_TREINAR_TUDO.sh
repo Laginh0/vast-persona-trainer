@@ -234,10 +234,12 @@ PY
 }
 
 train_model() {
-  local gpu_count batch_size accumulation
+  local gpu_count batch_size accumulation launcher_path
   gpu_count="$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')"
   (( gpu_count >= 1 )) || fail 'Nenhuma GPU NVIDIA foi detectada.'
   "$VENV_DIR/bin/python" -c "import torch; assert torch.cuda.is_available(); assert torch.cuda.device_count() >= $gpu_count; print([torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])"
+  launcher_path="$("$VENV_DIR/bin/python" -c 'import os, llamafactory.launcher; print(os.path.abspath(llamafactory.launcher.__file__))')"
+  [[ -f "$launcher_path" ]] || fail 'O modulo LlamaFactory nao esta disponivel no ambiente de treino.'
 
   if (( gpu_count >= 2 )); then batch_size=4; accumulation=1; else batch_size=2; accumulation=4; fi
   export CUDA_VISIBLE_DEVICES
@@ -248,7 +250,9 @@ train_model() {
   unset HF_TOKEN HUGGING_FACE_HUB_TOKEN WANDB_API_KEY
 
   note "Treinando $MODEL_NAME com $gpu_count GPU(s)"
-  torchrun --standalone --nproc_per_node="$gpu_count" "$VENV_DIR/bin/llamafactory-cli" train \
+  # Usa o Python do venv em todos os ranks; o torchrun da imagem base pode nao
+  # enxergar os pacotes instalados em $VENV_DIR.
+  "$VENV_DIR/bin/python" -m torch.distributed.run --standalone --nproc_per_node="$gpu_count" "$launcher_path" \
     --model_name_or_path "$MODEL_NAME" --trust_remote_code true \
     --stage sft --do_train true --finetuning_type lora --lora_target all --lora_rank 16 --lora_alpha 32 --quantization_bit 4 \
     --dataset_dir "$WORK_DIR/preparado" --dataset lage_persona --template qwen3 --cutoff_len "$CUTOFF_LEN" \
