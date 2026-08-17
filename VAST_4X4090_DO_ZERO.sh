@@ -28,8 +28,8 @@ OMP_DEFAULT=$(( CPU_COUNT / GPU_COUNT ))
 (( OMP_DEFAULT < 4 )) && OMP_DEFAULT=4
 (( OMP_DEFAULT > 8 )) && OMP_DEFAULT=8
 
-# O batch 3 preserva margem nos 24 GiB da 4090. Batch 4 pode ser testado depois.
-export PER_DEVICE_BATCH_SIZE="${PER_DEVICE_BATCH_SIZE:-3}"
+# Batch 6 explora a folga de VRAM observada; se houver OOM, reduza para 5 ou 4.
+export PER_DEVICE_BATCH_SIZE="${PER_DEVICE_BATCH_SIZE:-6}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-1}"
 export CUTOFF_LEN="${CUTOFF_LEN:-512}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$OMP_DEFAULT}"
