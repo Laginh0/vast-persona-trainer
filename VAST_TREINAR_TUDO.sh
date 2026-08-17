@@ -13,6 +13,8 @@ MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-4B}"
 EPOCHS="${EPOCHS:-1}"
 CUTOFF_LEN="${CUTOFF_LEN:-512}"
 MIN_RAM_MIB="${MIN_RAM_MIB:-6144}"
+PER_DEVICE_BATCH_SIZE="${PER_DEVICE_BATCH_SIZE:-}"
+GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-}"
 
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly VENV_DIR="$HOME/.venvs/lage-persona"
@@ -234,14 +236,18 @@ PY
 }
 
 train_model() {
-  local gpu_count batch_size accumulation launcher_path
+  local gpu_count batch_size accumulation default_batch default_accumulation launcher_path
   gpu_count="$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')"
   (( gpu_count >= 1 )) || fail 'Nenhuma GPU NVIDIA foi detectada.'
   "$VENV_DIR/bin/python" -c "import torch; assert torch.cuda.is_available(); assert torch.cuda.device_count() >= $gpu_count; print([torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])"
   launcher_path="$("$VENV_DIR/bin/python" -c 'import os, llamafactory.launcher; print(os.path.abspath(llamafactory.launcher.__file__))')"
   [[ -f "$launcher_path" ]] || fail 'O modulo LlamaFactory nao esta disponivel no ambiente de treino.'
 
-  if (( gpu_count >= 2 )); then batch_size=4; accumulation=1; else batch_size=2; accumulation=4; fi
+  if (( gpu_count >= 2 )); then default_batch=4; default_accumulation=1; else default_batch=2; default_accumulation=4; fi
+  batch_size="${PER_DEVICE_BATCH_SIZE:-$default_batch}"
+  accumulation="${GRADIENT_ACCUMULATION_STEPS:-$default_accumulation}"
+  [[ "$batch_size" =~ ^[1-9][0-9]*$ ]] || fail 'PER_DEVICE_BATCH_SIZE precisa ser um inteiro positivo.'
+  [[ "$accumulation" =~ ^[1-9][0-9]*$ ]] || fail 'GRADIENT_ACCUMULATION_STEPS precisa ser um inteiro positivo.'
   export CUDA_VISIBLE_DEVICES
   CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((gpu_count - 1)))"
   export HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_DISABLE_IMPLICIT_TOKEN=1
@@ -249,7 +255,7 @@ train_model() {
   export WANDB_DISABLED=true WANDB_MODE=disabled DO_NOT_TRACK=1 TRANSFORMERS_VERBOSITY=error TOKENIZERS_PARALLELISM=false PYTHONUTF8=1
   unset HF_TOKEN HUGGING_FACE_HUB_TOKEN WANDB_API_KEY
 
-  note "Treinando $MODEL_NAME com $gpu_count GPU(s)"
+  note "Treinando $MODEL_NAME com $gpu_count GPU(s), batch $batch_size por GPU e acumulacao $accumulation"
   # Usa o Python do venv em todos os ranks; o torchrun da imagem base pode nao
   # enxergar os pacotes instalados em $VENV_DIR.
   "$VENV_DIR/bin/python" -m torch.distributed.run --standalone --nproc_per_node="$gpu_count" "$launcher_path" \
