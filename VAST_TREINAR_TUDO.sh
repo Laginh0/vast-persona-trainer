@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Treinamento privado de persona no Vast.ai (Ubuntu/Debian com GPU NVIDIA).
 # Nao armazena URL, senha ou conversas no diretorio persistente da instancia.
+# Importante: durante o treino, o conteudo precisa existir em RAM/VRAM. Um dono
+# do host ou hipervisor malicioso pode inspecionar uma VM enquanto ela executa;
+# este script reduz rastros em disco, mas nao elimina esse risco.
 set -Eeuo pipefail
 umask 077
 
@@ -26,12 +29,17 @@ note() { printf '\n==> %s\n' "$*"; }
 
 cleanup() {
   unset DROPBOX_URL DOWNLOAD_URL
+  if [[ -n "$ENCRYPTED_ZIP" && "$ENCRYPTED_ZIP" == "$ENCRYPTED_DIR"/conversas.*.zip && -f "$ENCRYPTED_ZIP" ]]; then
+    rm -f -- "$ENCRYPTED_ZIP"
+  fi
   if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
     rm -rf -- "$WORK_DIR"
+    WORK_DIR=""
   fi
   if [[ -n "$RAM_MOUNT" && -d "$RAM_MOUNT" ]]; then
     mountpoint -q "$RAM_MOUNT" && umount "$RAM_MOUNT" || true
     rmdir "$RAM_MOUNT" 2>/dev/null || true
+    RAM_MOUNT=""
   fi
 }
 trap cleanup EXIT INT TERM
@@ -58,6 +66,24 @@ prepare_ram() {
   RAM_MOUNT="$(mktemp -d "$HOME/.cache/lage-persona-tmpfs.XXXXXXXX")"
   mount -t tmpfs -o "size=${MIN_RAM_MIB}M,mode=0700" tmpfs "$RAM_MOUNT"
   WORK_DIR="$RAM_MOUNT"
+}
+
+configure_private_runtime() {
+  [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]] || fail 'Diretorio temporario privado nao foi criado.'
+  mkdir -p "$WORK_DIR/tmp" "$WORK_DIR/hf-datasets" "$WORK_DIR/torchinductor"
+  chmod 700 "$WORK_DIR/tmp" "$WORK_DIR/hf-datasets" "$WORK_DIR/torchinductor"
+
+  # Impede que temporarios do Python, cache do dataset e artefatos de compilacao
+  # acabem em /tmp ou no disco persistente da instancia.
+  export TMPDIR="$WORK_DIR/tmp" TEMP="$WORK_DIR/tmp" TMP="$WORK_DIR/tmp"
+  export HF_DATASETS_CACHE="$WORK_DIR/hf-datasets"
+  export TORCHINDUCTOR_CACHE_DIR="$WORK_DIR/torchinductor"
+  export PYTHONDONTWRITEBYTECODE=1
+
+  # O script nunca grava comandos ou core dumps que possam conter referencias aos dados.
+  export HISTFILE=/dev/null HISTSIZE=0
+  set +o history 2>/dev/null || true
+  ulimit -c 0 2>/dev/null || true
 }
 
 install_system_packages() {
@@ -114,11 +140,16 @@ download_and_extract() {
   note 'Baixando o ZIP criptografado'
   curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output "$ENCRYPTED_ZIP" "$DOWNLOAD_URL"
   [[ -s "$ENCRYPTED_ZIP" ]] || fail 'O download retornou um arquivo vazio.'
+  7z l -slt "$ENCRYPTED_ZIP" | grep -q '^Encrypted = +$' || fail 'O ZIP nao possui arquivos criptografados. Crie um ZIP com senha e criptografia AES-256 antes de continuar.'
 
   note 'Digite a senha quando o 7-Zip solicitar; ela nao sera gravada'
   # -p sem valor faz o 7-Zip pedir a senha sem ecoar os caracteres.
   7z x -bd -p "$ENCRYPTED_ZIP" "-o$WORK_DIR/raw" || fail 'Nao foi possivel abrir o ZIP. Confira o link e a senha.'
   find "$WORK_DIR/raw" -type f -iname '*.txt' -print -quit | grep -q . || fail 'Nenhum arquivo TXT foi encontrado dentro do ZIP.'
+  # Depois de extrair na RAM, nao ha motivo para conservar sequer a copia cifrada.
+  rm -f -- "$ENCRYPTED_ZIP"
+  ENCRYPTED_ZIP=""
+  unset DROPBOX_URL DOWNLOAD_URL
 }
 
 prepare_dataset() {
@@ -244,7 +275,10 @@ encrypt_result() {
   7z a -t7z "$result" "$WORK_DIR/adapter/*" '-mhe=on' '-p' '-mx=5'
   chmod 600 "$result"
   rm -f -- "$ENCRYPTED_ZIP"
-  printf '\nConcluido. Arquivo final criptografado: %s\n' "$result"
+  ENCRYPTED_ZIP=""
+  note 'Removendo conversas, dataset, cache e adaptador em claro da RAM'
+  cleanup
+  printf '\nConcluido. A instancia reteve apenas o arquivo final criptografado: %s\n' "$result"
 }
 
 main() {
@@ -258,6 +292,7 @@ main() {
     fail 'Swap esta ativo. O script foi interrompido para evitar que conversas descriptografadas sejam paginadas para disco.'
   fi
   prepare_ram
+  configure_private_runtime
   install_python_environment
   download_and_extract
   prepare_dataset
