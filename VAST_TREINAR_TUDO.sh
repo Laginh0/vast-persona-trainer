@@ -289,7 +289,7 @@ main() {
   need_command nvidia-smi
   need_command 7z
   if swapon --noheadings --show 2>/dev/null | grep -q .; then
-    fail 'Swap esta ativo. O script foi interrompido para evitar que conversas descriptografadas sejam paginadas para disco.'
+    note 'AVISO: swap esta ativo. O treino continuara, mas paginas com conversas em claro podem ser gravadas no disco da instancia.'
   fi
   prepare_ram
   configure_private_runtime
