@@ -28,8 +28,8 @@ OMP_DEFAULT=$(( CPU_COUNT / GPU_COUNT ))
 (( OMP_DEFAULT < 4 )) && OMP_DEFAULT=4
 (( OMP_DEFAULT > 8 )) && OMP_DEFAULT=8
 
-# Batch 6 explora a folga de VRAM observada; se houver OOM, reduza para 5 ou 4.
-export PER_DEVICE_BATCH_SIZE="${PER_DEVICE_BATCH_SIZE:-6}"
+# Batch 12 maximiza a carga de treino; se houver OOM, reduza para 8 ou 6.
+export PER_DEVICE_BATCH_SIZE="${PER_DEVICE_BATCH_SIZE:-12}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-1}"
 export CUTOFF_LEN="${CUTOFF_LEN:-512}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$OMP_DEFAULT}"
