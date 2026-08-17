@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Treinamento privado de persona no Vast.ai (Ubuntu/Debian com GPU NVIDIA).
-# Nao armazena URL, senha ou conversas no diretorio persistente da instancia.
+# Nao armazena URL ou conversas no diretorio persistente da instancia.
 # Importante: durante o treino, o conteudo precisa existir em RAM/VRAM. Um dono
 # do host ou hipervisor malicioso pode inspecionar uma VM enquanto ela executa;
 # este script reduz rastros em disco, mas nao elimina esse risco.
@@ -16,22 +16,18 @@ MIN_RAM_MIB="${MIN_RAM_MIB:-6144}"
 
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly VENV_DIR="$HOME/.venvs/lage-persona"
-readonly ENCRYPTED_DIR="$HOME/.local/share/lage-persona-encrypted"
 readonly RESULTS_DIR="$HOME/lage-persona-resultados"
 
 BASE_PYTHON=""
 RAM_MOUNT=""
 WORK_DIR=""
-ENCRYPTED_ZIP=""
+INPUT_ZIP=""
 
 fail() { printf '\nERRO: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n==> %s\n' "$*"; }
 
 cleanup() {
-  unset DROPBOX_URL DOWNLOAD_URL
-  if [[ -n "$ENCRYPTED_ZIP" && "$ENCRYPTED_ZIP" == "$ENCRYPTED_DIR"/conversas.*.zip && -f "$ENCRYPTED_ZIP" ]]; then
-    rm -f -- "$ENCRYPTED_ZIP"
-  fi
+  unset DROPBOX_URL DOWNLOAD_URL INPUT_ZIP
   if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
     rm -rf -- "$WORK_DIR"
     WORK_DIR=""
@@ -125,7 +121,7 @@ install_python_environment() {
 }
 
 download_and_extract() {
-  read -r -p 'Cole o link HTTPS do Dropbox para o arquivo .zip protegido por senha: ' DROPBOX_URL
+  read -r -p 'Cole o link HTTPS do Dropbox para o arquivo .zip: ' DROPBOX_URL
   [[ "$DROPBOX_URL" == https://* ]] || fail 'O link precisa começar com https://.'
 
   if [[ "$DROPBOX_URL" == *dropbox.com* && "$DROPBOX_URL" != *'dl=1'* ]]; then
@@ -134,21 +130,17 @@ download_and_extract() {
     DOWNLOAD_URL="$DROPBOX_URL"
   fi
 
-  mkdir -p "$ENCRYPTED_DIR"
-  chmod 700 "$ENCRYPTED_DIR"
-  ENCRYPTED_ZIP="$ENCRYPTED_DIR/conversas.$$.zip"
-  note 'Baixando o ZIP criptografado'
-  curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output "$ENCRYPTED_ZIP" "$DOWNLOAD_URL"
-  [[ -s "$ENCRYPTED_ZIP" ]] || fail 'O download retornou um arquivo vazio.'
-  7z l -slt "$ENCRYPTED_ZIP" | grep -q '^Encrypted = +$' || fail 'O ZIP nao possui arquivos criptografados. Crie um ZIP com senha e criptografia AES-256 antes de continuar.'
+  INPUT_ZIP="$WORK_DIR/conversas.$$.zip"
+  note 'Baixando o ZIP diretamente para a RAM'
+  curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output "$INPUT_ZIP" "$DOWNLOAD_URL"
+  [[ -s "$INPUT_ZIP" ]] || fail 'O download retornou um arquivo vazio.'
 
-  note 'Digite a senha quando o 7-Zip solicitar; ela nao sera gravada'
-  # -p sem valor faz o 7-Zip pedir a senha sem ecoar os caracteres.
-  7z x -bd -p "$ENCRYPTED_ZIP" "-o$WORK_DIR/raw" || fail 'Nao foi possivel abrir o ZIP. Confira o link e a senha.'
+  note 'Extraindo o ZIP apenas na RAM'
+  7z x -bd "$INPUT_ZIP" "-o$WORK_DIR/raw" || fail 'Nao foi possivel abrir o ZIP. Confira o link.'
   find "$WORK_DIR/raw" -type f -iname '*.txt' -print -quit | grep -q . || fail 'Nenhum arquivo TXT foi encontrado dentro do ZIP.'
-  # Depois de extrair na RAM, nao ha motivo para conservar sequer a copia cifrada.
-  rm -f -- "$ENCRYPTED_ZIP"
-  ENCRYPTED_ZIP=""
+  # Depois de extrair na RAM, nao ha motivo para conservar a copia baixada.
+  rm -f -- "$INPUT_ZIP"
+  INPUT_ZIP=""
   unset DROPBOX_URL DOWNLOAD_URL
 }
 
@@ -274,8 +266,6 @@ encrypt_result() {
   note 'Digite uma senha para criptografar o adaptador LoRA final'
   7z a -t7z "$result" "$WORK_DIR/adapter/*" '-mhe=on' '-p' '-mx=5'
   chmod 600 "$result"
-  rm -f -- "$ENCRYPTED_ZIP"
-  ENCRYPTED_ZIP=""
   note 'Removendo conversas, dataset, cache e adaptador em claro da RAM'
   cleanup
   printf '\nConcluido. A instancia reteve apenas o arquivo final criptografado: %s\n' "$result"
